@@ -12,6 +12,7 @@ find_package(catkin REQUIRED COMPONENTS
   sensor_msgs
   image_transport
   cv_bridge
+  nav_msgs
 )
 find_package(Qt5  REQUIRED COMPONENTS  Widgets  )
 #设置自动生成moc文件，一定要设置

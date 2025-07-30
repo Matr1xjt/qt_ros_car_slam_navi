@@ -6,7 +6,10 @@
 #include <QString>
 #include <QTimer>
 #include <QGridLayout>
-#
+#include <QPainter>
+#include <QPushButton>
+#include <QFileDialog>
+#include <QDebug>
 Basic::Basic(int argc, char**argv,QWidget *parent) :
   QWidget(parent),
   ui(new Ui::Basic),
@@ -58,6 +61,23 @@ Basic::Basic(int argc, char**argv,QWidget *parent) :
   image_widget->move(width()/2-650,height()/2);
   rgb_sub = it->subscribe("/camera/color/image_raw",1, &Basic::rgbCallback, this);
   depth_sub = it->subscribe("/camera/aligned_depth_to_color/image_raw",1,&Basic::depthCallback,this);
+
+  label_map = new QLabel(this);
+  label_odom = new QLabel(this);
+  label_map->setFixedSize(600,600);
+  layout->addWidget(label_map);
+  setLayout(layout);
+  nh_map = new ros::NodeHandle;
+  map_sub = nh_map->subscribe("/map",1,&Basic::mapCallback,this);
+  odom_sub = nh_map->subscribe("/odom",1,&Basic::odomCallback,this);
+
+  QPushButton * save_map_btn = new QPushButton("save",this);
+  save_map_btn->setStyleSheet("font-size:20px; padding:8px");
+  save_map_btn->move(width()-200,height()-80);
+  connect(save_map_btn,&QPushButton::clicked,this,&Basic::saveMapImage);
+  drawButton = new QPushButton("draw", this);
+  drawButton->setGeometry(10, 10, 100, 30);
+  connect(drawButton, &QPushButton::clicked, this, &Basic::toggleDrawing);
 }
 
 Basic::~Basic()
@@ -178,6 +198,28 @@ void Basic::move_ctl_speed(QString dir)
   label_speed_show->setText(text);
 }
 
+void Basic::updateMapWithDrawing()
+{
+  QPixmap pixmap = QPixmap::fromImage(map_image);
+  QPainter painter(&pixmap);
+  painter.setBrush(Qt::red);
+  painter.drawEllipse(robot_pos_px,5,5);
+
+  painter.setBrush(Qt::blue);
+  for (const QPoint & p: usr_draw_points){
+    painter.drawEllipse(p,3,3);
+  }
+  display_pixmap = pixmap;
+  label_map->setPixmap(display_pixmap);
+}
+
+void Basic::saveMapImage()
+{
+  QString filename = QFileDialog::getSaveFileName(this, "save_map", "", "PNG_picture (*.png);;JPEG_picture (*.jpg)");
+  if (!filename.isEmpty())
+    display_pixmap.save(filename);
+}
+
 
 void Basic::rosMsgCallback(const std_msgs::String::ConstPtr &msg, Basic *context){
   QString qmsg = QString::fromStdString(msg->data);
@@ -201,15 +243,87 @@ void Basic::rgbCallback(const sensor_msgs::ImageConstPtr &msg)
 void Basic::depthCallback(const sensor_msgs::ImageConstPtr &msg)
 {
   try {
-      cv::Mat depth =cv_bridge::toCvShare(msg, "16UC1")->image;
-      cv::Mat depth_vis;
-      depth.convertTo(depth_vis,CV_8SC1,0.03);
+    cv::Mat depth =cv_bridge::toCvShare(msg, "16UC1")->image;
+    cv::Mat depth_vis;
+    depth.convertTo(depth_vis,CV_8SC1,0.03);
 
-      QImage img(depth_vis.data,depth_vis.cols,depth_vis.rows,depth_vis.step, QImage::Format_Grayscale8);
-      label_depth->setPixmap(QPixmap::fromImage(img).scaled(label_depth->size(), Qt::KeepAspectRatio));
+    QImage img(depth_vis.data,depth_vis.cols,depth_vis.rows,depth_vis.step, QImage::Format_Grayscale8);
+    label_depth->setPixmap(QPixmap::fromImage(img).scaled(label_depth->size(), Qt::KeepAspectRatio));
   } catch (cv_bridge::Exception &e) {
     ROS_ERROR("Depth transport error: %s",e.what());
   }
+}
+
+void Basic::mapCallback(const nav_msgs::OccupancyGridPtr &msg)
+{
+  resolution = msg->info.resolution;
+  int width = msg->info.width;
+  int height = msg->info.height;
+  const std::vector<int8_t> &data = msg->data;
+
+  QImage image(width,height, QImage::Format_BGR888);
+  for(int y=0; y<height ;y++){
+    for(int x = 0; x< width; x++){
+      int i = x +(height-1-y)*height;
+      int8_t value = data[i];
+      QColor color;
+
+      if(value == 0)
+        color = Qt::white;
+      else if(value == 100)
+        color = Qt::black;
+      else
+        color = Qt::gray;
+
+      image.setPixelColor(x,y,color);
+    }
+  }
+  map_image = image.scaled(label_map->size(),Qt::KeepAspectRatio,Qt::FastTransformation);
+  QPixmap pixmap = QPixmap::fromImage(map_image);
+  QPainter painter(&pixmap);
+  painter.setBrush(Qt::red);
+  painter.drawEllipse(robot_pos_px, 5, 5);
+  for (const QPoint &p :usr_draw_points){
+    painter.setBrush(Qt::blue);
+    painter.drawEllipse(p,3,3);
+  }
+  display_pixmap = pixmap;
+  label_map->setPixmap(display_pixmap);
+
+
+}
+
+void Basic::odomCallback(const nav_msgs::OdometryPtr &msg)
+{
+  float x = msg->pose.pose.position.x;
+  float y = msg->pose.pose.position.y;
+
+  int px = x / resolution;
+  int py = y / resolution;
+
+  robot_pos_px = QPoint(px, map_image.height()-py);
+
+  QPixmap pixmap = QPixmap::fromImage(map_image);
+  QPainter painter(&pixmap);
+  painter.setBrush(Qt::red);
+  painter.drawEllipse(robot_pos_px, 5, 5);
+
+  display_pixmap = pixmap;
+  label_map->setPixmap(display_pixmap);
+}
+
+void Basic::toggleDrawing()
+{
+  drawing_enabled = !drawing_enabled;
+  if(drawing_enabled){
+    drawButton->setText("drawing");
+    qDebug() << "drawing started";
+  }
+  else{
+    drawButton->setText("draw");
+    qDebug() << "draw closed";
+  }
+  update();
 }
 
 
@@ -312,4 +426,17 @@ void Basic::keyReleaseEvent(QKeyEvent *event){
   }
 
   cmd_pub.publish(msg);
+}
+
+void Basic::mousePressEvent(QMouseEvent *event)
+{
+  if (!drawing_enabled) return;
+
+  QPoint pos = event->pos();
+
+  if (label_map->geometry().contains(pos)){
+    QPoint relative_pos = label_map->mapFromParent(pos);
+    usr_draw_points.push_back(relative_pos);
+    updateMapWithDrawing();
+  }
 }
